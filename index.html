@@ -61,6 +61,7 @@ button{cursor:pointer}
 .rule::before,.rule::after{content:"";flex:1;height:2px;background:currentColor;opacity:.7}
 .rule span{font-size:.95rem;color:var(--muted)}
 
+.status{margin:6px 0 0;text-align:center;font-size:.88rem;color:var(--muted)}
 /* sticky tools */
 .tools{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--bg);padding-block:8px 10px;border-bottom:1px solid var(--line)}
 .search{position:relative}
@@ -157,6 +158,8 @@ footer.contact .tel{font-size:1.7rem;font-weight:800;letter-spacing:.04em;direct
     <div class="rule"><span>خدمة توصيل الطلبات للمنازل</span></div>
   </header>
 
+  <p class="status" id="status" role="status" hidden></p>
+
   <div class="tools">
     <div class="search">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
@@ -217,14 +220,16 @@ footer.contact .tel{font-size:1.7rem;font-weight:800;letter-spacing:.04em;direct
 (function(){
   var CASHIER = '201034813573';   // رقم الكاشير على واتساب (بالصيغة الدولية بدون +)
   var RESTAURANT = 'العبد';
+  // رابط ملف Google Sheet المنشور بصيغة CSV (ملف > مشاركة > نشر على الويب > CSV). اتركه فارغًا لاستخدام المنيو المدمج.
+  var SHEET_CSV_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vS8hKZ-zbiUX3oZFoxgeR70x8LTqX7LNegROokxGISHM8OEgiTxOA3bAiw10bphb4VWNoZ9JHF7l3Pg/pub?output=csv';
 
-  // ---------- المنيو (من الصورة) ----------
+  // ---------- المنيو المدمج (احتياطي إذا لم يُضبط رابط الشيت أو تعذر تحميله) ----------
   function I(n, prices, sizes, sub){
     var v = prices.map(function(p,i){ return {l: sizes ? sizes[i] : '', p: p}; });
     return {n:n, v:v, sub:sub||''};
   }
   var MK = ['وسط','كبير'];
-  var DATA = [
+  var DEFAULT = [
     {id:'sweet', name:'فطائر الحلو', note:'', items:[
       I('فطيرة بالسكر',[60]), I('فطيرة كاسترد',[75]), I('فطيرة لوتس',[90]),
       I('فطيرة قشطة وعسل',[85]), I('فطيرة مربى وقشطة',[80]), I('فطيرة قشطة مكسرات',[80]),
@@ -259,17 +264,103 @@ footer.contact .tel{font-size:1.7rem;font-weight:800;letter-spacing:.04em;direct
       I('إضافة حشو',[30]), I('علبة مخلل',[10]), I('باكيت بطاطس',[20])
     ]}
   ];
-  var BY = {}; // id -> item
-  DATA.forEach(function(s){ s.items.forEach(function(it,i){ it.id = s.id + i; it.sec = s.id; BY[it.id] = it; }); });
+  var BY = {}, DATA = [], curSig = '';
+  function setData(list){
+    curSig = JSON.stringify(list); BY = {};
+    DATA = list.map(function(sec,si){
+      sec.id = 's'+si;
+      sec.items.forEach(function(it,i){ it.id = sec.id+'_'+i; it.sec = sec.id; it.key = sec.name+'::'+it.n; BY[it.id] = it; });
+      return sec;
+    });
+  }
+  function validList(l){ return Array.isArray(l) && l.length>0 && l.every(function(s){ return s && s.name && Array.isArray(s.items) && s.items.length && s.items.every(function(it){ return it.n && Array.isArray(it.v) && it.v.length && it.v.every(function(v){ return typeof v.p==='number' && isFinite(v.p); }); }); }); }
+
+  // ---------- قراءة Google Sheet (CSV) ----------
+  // الأعمدة: القسم | الصنف | الحجم | السعر | وصف | ملاحظة القسم | متاح
+  // كل صف = سعر واحد. الصنف ذو الأحجام المتعددة يُكتب في عدة صفوف بنفس الاسم. اترك القسم فارغًا ليأخذ قسم الصف السابق.
+  function toLatin(x){ return String(x).replace(/[\u0660-\u0669]/g,function(d){return d.charCodeAt(0)-0x0660;}).replace(/[\u06F0-\u06F9]/g,function(d){return d.charCodeAt(0)-0x06F0;}); }
+  function parseCSV(t){
+    t = t.replace(/^\uFEFF/,'');
+    var rows=[], row=[], f='', q=false, i, c;
+    for(i=0;i<t.length;i++){
+      c=t.charAt(i);
+      if(q){ if(c==='"'){ if(t.charAt(i+1)==='"'){ f+='"'; i++; } else q=false; } else f+=c; }
+      else if(c==='"') q=true;
+      else if(c===','){ row.push(f); f=''; }
+      else if(c==='\n'||c==='\r'){ if(c==='\r'&&t.charAt(i+1)==='\n') i++; row.push(f); f=''; rows.push(row); row=[]; }
+      else f+=c;
+    }
+    if(f!==''||row.length){ row.push(f); rows.push(row); }
+    return rows.filter(function(r){ return r.some(function(x){ return x.trim()!==''; }); });
+  }
+  var COLS = {
+    sec:['القسم','section','category','الفئة'], item:['الصنف','item','name','الاسم'], size:['الحجم','size'],
+    price:['السعر','price'], desc:['وصف','الوصف','description','desc'], secnote:['ملاحظة القسم','section note','secnote'],
+    avail:['متاح','available']
+  };
+  var OFF = ['لا','no','false','0','x','×','مخفي','نفذ','غير متاح'];
+  function buildFromCSV(rows){
+    if(rows.length<2) throw new Error('empty');
+    var head = rows[0].map(function(h){ return h.trim().toLowerCase(); }), ix = {};
+    Object.keys(COLS).forEach(function(k){ ix[k]=-1; COLS[k].forEach(function(a){ var j=head.indexOf(a); if(j>-1 && ix[k]<0) ix[k]=j; }); });
+    if(ix.sec<0||ix.item<0||ix.price<0) throw new Error('columns');
+    function cell(r,k){ return ix[k]>-1 && r[ix[k]]!==undefined ? r[ix[k]].trim() : ''; }
+    var secs=[], secBy={}, itemBy={}, lastSec='';
+    rows.slice(1).forEach(function(r){
+      var sn=cell(r,'sec')||lastSec, name=cell(r,'item'), price=parseFloat(toLatin(cell(r,'price')).replace(/[^\d.]/g,''));
+      if(cell(r,'sec')) lastSec=sn;
+      if(!sn||!name||!isFinite(price)) return;
+      if(OFF.indexOf(cell(r,'avail').toLowerCase())>-1) return;
+      var sec=secBy[sn];
+      if(!sec){ sec={name:sn,note:'',items:[]}; secBy[sn]=sec; secs.push(sec); }
+      if(!sec.note && cell(r,'secnote')) sec.note=cell(r,'secnote');
+      var ik=sn+'::'+name, it=itemBy[ik];
+      if(!it){ it={n:name,sub:'',v:[]}; itemBy[ik]=it; sec.items.push(it); }
+      if(!it.sub && cell(r,'desc')) it.sub=cell(r,'desc');
+      it.v.push({l:cell(r,'size'),p:price});
+    });
+    if(!validList(secs)) throw new Error('nodata');
+    return secs;
+  }
+
+  // حفظ السلة بأسماء الأصناف، حتى لا تتأثر بتغيير ترتيب الشيت
+  function cartToStore(){
+    var o={}; Object.keys(cart).forEach(function(k){ var p=k.split('|'), it=BY[p[0]]; if(it && it.v[+p[1]]) o[it.key+'|'+it.v[+p[1]].l]=cart[k]; }); return o;
+  }
+  function cartFromStore(o){
+    var idx={}; cart={};
+    Object.keys(BY).forEach(function(id){ var it=BY[id]; it.v.forEach(function(v,i){ idx[it.key+'|'+v.l]=id+'|'+i; }); });
+    Object.keys(o||{}).forEach(function(k){ if(idx[k] && o[k]>0) cart[idx[k]]=Math.min(99,o[k]|0); });
+  }
+  function setStatus(t){ var el=document.getElementById('status'); if(!el) return; el.textContent=t; el.hidden=!t; }
+  function applyData(list){
+    if(JSON.stringify(list)===curSig) return;
+    var stored=cartToStore(); setData(list); cartFromStore(stored); sel={};
+    renderChips(); renderMenu(); renderBar(); if(!$('sheet').hidden){ renderLines(); if(!Object.keys(cart).length) closeSheet(); }
+    save();
+  }
+  function loadSheet(){
+    if(!SHEET_CSV_URL) return;
+    var u=SHEET_CSV_URL+(SHEET_CSV_URL.indexOf('?')>-1?'&':'?')+'_='+Date.now();
+    fetch(u,{cache:'no-store'}).then(function(r){ if(!r.ok) throw new Error('http'); return r.text(); })
+      .then(function(t){
+        var list=buildFromCSV(parseCSV(t));
+        try{ localStorage.setItem('abd.menu',JSON.stringify(list)); }catch(e){}
+        setStatus(''); applyData(list);
+      })
+      .catch(function(){ setStatus('تعذّر تحديث الأسعار الآن، والمعروض آخر أسعار محفوظة.'); });
+  }
+  setData(DEFAULT);
 
   // ---------- الحالة ----------
   var cart = {};   // key "itemId|variantIdx" -> qty
   var sel = {};    // itemId -> variantIdx
   var form = {type:'dine', table:'', name:'', phone:'', addr:'', notes:''};
   var query = '';
-  try { var c = JSON.parse(localStorage.getItem('abd.cart')||'{}'); if(c && typeof c==='object'){ Object.keys(c).forEach(function(k){ var p=k.split('|'); if(BY[p[0]] && BY[p[0]].v[+p[1]] && c[k]>0) cart[k]=Math.min(99,c[k]|0); }); } } catch(e){}
+  var rawCart = {};
+  try { rawCart = JSON.parse(localStorage.getItem('abd.cart')||'{}') || {}; } catch(e){}
   try { var f = JSON.parse(localStorage.getItem('abd.form')||'{}'); if(f && typeof f==='object'){ Object.keys(form).forEach(function(k){ if(typeof f[k]==='string') form[k]=f[k]; }); } } catch(e){}
-  function save(){ try{ localStorage.setItem('abd.cart',JSON.stringify(cart)); localStorage.setItem('abd.form',JSON.stringify(form)); }catch(e){} }
+  function save(){ try{ localStorage.setItem('abd.cart',JSON.stringify(cartToStore())); localStorage.setItem('abd.form',JSON.stringify(form)); }catch(e){} }
 
   var $ = function(id){ return document.getElementById(id); };
   function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
@@ -444,7 +535,12 @@ footer.contact .tel{font-size:1.7rem;font-weight:800;letter-spacing:.04em;direct
     });
   },{passive:true});
 
-  renderChips(); renderMenu(); renderBar(); applyType();
+  (function(){
+    var cached=null; try{ cached=JSON.parse(localStorage.getItem('abd.menu')||'null'); }catch(e){}
+    if(SHEET_CSV_URL && validList(cached)) setData(cached);
+    cartFromStore(rawCart);
+  })();
+  renderChips(); renderMenu(); renderBar(); applyType(); loadSheet();
 })();
 </script>
 
